@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Numba cache
+*.nbc
+*.nbi
+
+# Logs
+*.log
+
+# Data files (not included — see README for data setup)
+data/
+*.csv.gz
+
+# Large results (only WF summaries are tracked)
+results/*/results.csv
+results/*_ckpt.csv
+results/*_checkpoint.csv
+results/ifvg_sniper*/
+results/consolidation_range_*min/
+results/consolidation_range_*min_ckpt.csv
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Zip exports
+*.zip

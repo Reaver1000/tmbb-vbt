@@ -1,0 +1,127 @@
+//@version=6
+// Consolidation Range with Signals — Walk-Forward Optimised
+// Original indicator: Zeiierman  |  Python port + WF validation: TMBB_VBT (2026-06-24)
+//
+// WF-optimal defaults for MNQ 5min (4-fold anchored-expanding WF, 17.5 months):
+//   method=ADX, len=14, band_mult=1.8, sl=0.7, tp=0.3*, cooldown=10, adx_thresh=17
+//   * tp1=0.3 is the critical WF finding — phase-2 best-fit was 0.5 but folds 2-4
+//     consistently chose 0.3 in OOS; 0.5 overfits the IS window.
+//
+// OOS results: +$5,272 total | 3/4 folds pass | fold 4 (current regime) +$332
+// pnl_dd expectation: ~1.5–4.0 (not the IS-inflated 9.83)
+// Status: DEPLOY on 5min MNQ.  1min DEAD.  15min paper-trade only (few trades).
+
+strategy("Consolidation Range [WF-Optimised]",
+     overlay           = true,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.cash_per_contract,
+     commission_value  = 0.62,
+     calc_on_every_tick = false)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+var string G = "Strategy Parameters"
+var string V = "Volatility Method"
+
+method_inp   = input.string("ADX",  "Detection Method", options=["ADX","Volatility"], group=G)
+len_inp      = input.int(14,        "Length",           minval=1,    group=G)
+band_mult    = input.float(1.8,     "Band Multiplier",  step=0.1,    group=G)
+sl_mult      = input.float(0.7,     "SL Multiplier",    step=0.05,   group=G)
+tp1_mult     = input.float(0.3,     "TP Multiplier [WF=0.3]", step=0.05, group=G)
+cooldown_inp = input.int(10,        "Cooldown Bars",    minval=1,    group=G)
+adx_thresh   = input.float(17.0,    "ADX Threshold",    step=0.5,    group=G)
+adx_smooth   = input.int(10,        "ADX Smoothing",    minval=1,    group=G)
+
+vol_std      = input.float(0.8,     "Vol Mult STD",     step=0.05,   group=V)
+vol_var      = input.float(0.8,     "Vol Mult VAR",     step=0.05,   group=V)
+vol_atr      = input.float(0.9,     "Vol Mult ATR",     step=0.05,   group=V)
+
+// ─── ADX detection ────────────────────────────────────────────────────────────
+[_, _, adx_val] = ta.dmi(len_inp, adx_smooth)
+is_adx = adx_val < adx_thresh
+
+// ─── Volatility compression detection ────────────────────────────────────────
+// logret std/var/atr each below their own SMA × multiplier
+logret   = math.log(close / close[1])
+std_now  = ta.stdev(logret, len_inp)
+std_avg  = ta.sma(std_now, len_inp)
+var_now  = std_now * std_now
+var_avg  = ta.sma(var_now, len_inp)
+atr_now  = ta.atr(len_inp)
+atr_avg  = ta.sma(atr_now, len_inp)
+is_vol   = (std_avg > 0 and std_now < std_avg * vol_std)
+         and (var_avg > 0 and var_now < var_avg * vol_var)
+         and (atr_avg > 0 and atr_now < atr_avg * vol_atr)
+
+methodDetected = method_inp == "ADX" ? is_adx : is_vol
+
+// ─── r (range step size) ─────────────────────────────────────────────────────
+// Pine: diff = |high - low[1]|;  r = SMA(2.618 × diff, 2000) × band_mult
+r = ta.sma(2.618 * math.abs(high - low[1]), 2000) * band_mult
+
+// ─── Range filter ─────────────────────────────────────────────────────────────
+// Simplification (proved against Pine source):
+//   |close - prev| >= r  →  rngfilt = close   (step to price)
+//   else                 →  rngfilt = prev     (hold)
+var float rngfilt = close
+rngfilt := math.abs(close - rngfilt[1]) >= r ? close : rngfilt[1]
+
+step_up   = rngfilt > rngfilt[1]
+step_down = rngfilt < rngfilt[1]
+hiband    = rngfilt + r
+loband    = rngfilt - r
+
+// ─── rangeVisible state machine ───────────────────────────────────────────────
+// Set True when method detects ranging; cleared when close[1] breaks the bands
+// that were active at last methodDetected bar.
+var float prev_hi       = na
+var float prev_lo       = na
+var bool  range_visible = false
+
+if methodDetected
+    range_visible := true
+    prev_hi := hiband
+    prev_lo := loband
+else if not na(prev_hi)
+    if close[1] > prev_hi or close[1] < prev_lo
+        range_visible := false
+
+// ─── Cooldown ─────────────────────────────────────────────────────────────────
+var int last_sig = na
+can_trigger = na(last_sig) or (bar_index - last_sig) >= cooldown_inp
+
+// ─── Entry conditions ─────────────────────────────────────────────────────────
+long_cond  = range_visible and step_up   and can_trigger
+short_cond = range_visible and step_down and can_trigger
+
+// SL/TP anchored to rngfilt ± r × mult (absolute prices, not fractions)
+sl_long  = rngfilt - r * sl_mult
+tp_long  = rngfilt + r * tp1_mult
+sl_short = rngfilt + r * sl_mult
+tp_short = rngfilt - r * tp1_mult
+
+// ─── Strategy orders ──────────────────────────────────────────────────────────
+if long_cond
+    strategy.entry("Long",  strategy.long)
+    strategy.exit("LX", "Long",  stop=sl_long,  limit=tp_long)
+    last_sig := bar_index
+
+if short_cond
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", "Short", stop=sl_short, limit=tp_short)
+    last_sig := bar_index
+
+// ─── Visuals ──────────────────────────────────────────────────────────────────
+rng_col = step_up   ? color.new(color.lime,  0)  :
+          step_down ? color.new(color.red,   0)  :
+                      color.new(color.gray, 40)
+
+plot(rngfilt,                   "Rng Filter", color=rng_col,                    linewidth=2)
+plot(range_visible ? hiband : na, "Hi Band",  color=color.new(color.blue, 70),  linewidth=1)
+plot(range_visible ? loband : na, "Lo Band",  color=color.new(color.blue, 70),  linewidth=1)
+
+plotshape(long_cond,  title="Long",  style=shape.labelup,   location=location.belowbar,
+          color=color.new(color.green, 0), text="L", size=size.small)
+plotshape(short_cond, title="Short", style=shape.labeldown, location=location.abovebar,
+          color=color.new(color.red,   0), text="S", size=size.small)
